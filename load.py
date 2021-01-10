@@ -68,7 +68,7 @@ def get_labels(file_name):
             clf_labels.append(np.array(label_data[0]['clf_labels']).reshape(39, 29, 15))
 
             reg_labels.append(np.array(label_data[0]['reg_labels']).reshape(39, 29, 60))
-        if i == 100:
+        if i == 1000:
             break
 
 
@@ -110,6 +110,20 @@ def get_mask_for_mini_batch(x):
 
     return (mask_clf_0 + mask_clf_1, mask_reg_0 + mask_reg_1)
 
+def get_mask_for_validation(x):
+    out = torch.tensor(x).contiguous().view(-1)
+    nz = torch.nonzero(out==-1).view(-1)
+    mask_clf = torch.ones(out.shape)
+
+    mask_clf[nz] = 0
+
+    mask_clf = mask_clf.view(x.shape)
+    mask_reg = mask_clf.repeat_interleave(repeats = 4, dim = 1)
+
+    return mask_clf, mask_reg
+
+
+
 if __name__ == '__main__':
     if not os.path.exists("./coco/models"):
         os.mkdir("./coco/models")
@@ -118,12 +132,16 @@ if __name__ == '__main__':
         torch.save(vgg16, "./coco/models/vgg16.pth")
     else:
         vgg16 = torch.load("./coco/models/vgg16.pth")
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     
     vgg16_t = torch.nn.Sequential(*list(vgg16.children())[0][:-1])
+    vgg16_t.to(device)
     vgg16_t.eval()
     # print(vgg16_t)
 
     model = rcnn()
+    model.to(device)
 
     file_name = './coco/annotations/train_ids.json'
     train_img, train_clf, train_reg = get_labels(file_name)
@@ -132,9 +150,9 @@ if __name__ == '__main__':
     train_clf = np.moveaxis(train_clf, 3, 1)
     train_reg = np.moveaxis(train_reg, 3, 1)
 
-    train_img = torch.tensor(train_img, dtype = torch.float32)
-    train_clf = torch.tensor(train_clf, dtype = torch.float32)
-    train_reg = torch.tensor(train_reg, dtype = torch.float32)
+    train_img = torch.tensor(train_img, dtype = torch.float32).to(device)
+    train_clf = torch.tensor(train_clf, dtype = torch.float32).to(device)
+    train_reg = torch.tensor(train_reg, dtype = torch.float32).to(device)
 
     file_name = './coco/annotations/val_ids.json'
     val_img, val_clf, val_reg = get_labels(file_name)
@@ -142,6 +160,18 @@ if __name__ == '__main__':
 
     val_clf = np.moveaxis(val_clf, 3, 1)
     val_reg = np.moveaxis(val_reg, 3, 1)
+
+    mask_clf_val, mask_reg_val = get_mask_for_validation(val_clf)
+
+    val_img = torch.tensor(val_img, dtype = torch.float32).to(device)
+    val_clf = torch.tensor(val_clf, dtype = torch.float32).to(device)
+    val_reg = torch.tensor(val_reg, dtype = torch.float32).to(device)
+
+    mask_clf_val = mask_clf_val.to(device)
+    mask_reg_val = mask_reg_val.to(device)
+
+    val_clf = val_clf * mask_clf_val
+    val_reg = val_reg * mask_reg_val
 
     val_img = torch.tensor(val_img, dtype = torch.float32)
     val_clf = torch.tensor(val_clf, dtype = torch.float32)
@@ -160,7 +190,7 @@ if __name__ == '__main__':
 
 
     for epoch in range(5):
-    
+        train_loss = 0
         for batch in data_loader:
 
             optimizer.zero_grad()
@@ -169,11 +199,11 @@ if __name__ == '__main__':
             label_clf = batch[1]
             label_reg = batch[2]
 
-            x = vgg16_t(img)
-            
-            output_clf, output_reg = model(x)
+            output_clf, output_reg = model(vgg16_t(img))
 
-            mask_clf, mask_reg = get_mask_for_mini_batch(output_clf)
+            mask_clf, mask_reg = get_mask_for_mini_batch(label_clf)
+            mask_clf = torch.tensor(mask_clf).to(device)
+            mask_reg = torch.tensor(mask_reg).to(device)
             
             # print('mask_clf: ', mask_clf.shape)
             # print('label_clf: ', label_clf.shape)
@@ -191,12 +221,13 @@ if __name__ == '__main__':
             loss = mse_loss(output_reg, label_reg) + bce_loss(output_clf, label_clf.detach())
 
             loss.backward()
+            train_loss += loss.detach().item()
         
         model.eval()
-        intermediate_output = vgg16_t(val_img)
-        val_output_clf, val_output_reg = model(intermediate_output)
-        val_loss = mse_loss(val_output_reg, val_reg) + bce_loss(val_output_clf, val_clf.detach())
-        print('Epoch Number: {} \t Validation Loss: {} '.format(epoch, val_loss))
+        with torch.no_grad():
+            val_output_clf, val_output_reg = model(vgg16_t(val_img))
+            val_loss = mse_loss(val_output_reg, val_reg) + bce_loss(val_output_clf, val_clf.detach())
+        print('Epoch Number: {}\t Train Loss: {} \t Validation Loss: {} '.format(epoch, train_loss/1000, val_loss.detach().item()/287))
         model.train()
 
 
